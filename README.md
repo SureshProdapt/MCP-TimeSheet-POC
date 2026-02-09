@@ -16,11 +16,7 @@ This project automates the creation of daily timesheets by fetching data from Ji
     ```
 
 2.  Configure environment variables:
-    Copy `.env.example` to `.env` and fill in your credentials.
-
-    ```bash
-    cp .env.example .env
-    ```
+    add `.env` file and add all the required credentials from `config.py`
 
 ## Usage
 
