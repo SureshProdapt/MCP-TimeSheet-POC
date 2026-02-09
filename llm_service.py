@@ -33,6 +33,7 @@ def summarize_activity(jira_content: str, github_content: str, date: str) -> str
     {github_content}
     
     Format the output as a single paragraph describing the work done.
+    Do NOT start with "Here is a summary" or similar intros. Start directly with the tasks.
     """
     
     try:

@@ -95,15 +95,15 @@ async def get_github_activity(username: str, date: str) -> str:
     
     async with httpx.AsyncClient() as client:
         try:
-            # Fetch user events (300 events is a reasonable daily limit to check)
-            # This endpoint lists public events performed by a user
-            # For private events, the token must have repo scope and we use /users/{username}/events
+            # 1. Identify active repositories from User Events
             events_url = f"https://api.github.com/users/{username}/events"
-            params = {"per_page": 100} 
+            params = {"per_page": 100}
             
+            active_repos = set()
             activity_log = []
             page = 1
             
+            # Scan events to find active repos and non-commit events
             while True:
                 response = await client.get(events_url, headers=headers, params={**params, "page": page})
                 response.raise_for_status()
@@ -116,30 +116,65 @@ async def get_github_activity(username: str, date: str) -> str:
                     created_at = event.get("created_at", "")[:10] # YYYY-MM-DD
                     
                     if created_at == date:
+                        repo_name = event.get("repo", {}).get("name")
                         event_type = event.get("type")
-                        repo_name = event.get("repo", {}).get("name", "unknown")
                         
                         if event_type == "PushEvent":
-                            commits = event.get("payload", {}).get("commits", [])
-                            for commit in commits:
-                                msg = commit.get("message")
-                                activity_log.append(f"Pushed to {repo_name}: {msg}")
+                            if repo_name:
+                                active_repos.add(repo_name)
+                        elif event_type == "CreateEvent":
+                            # Also check commits for new branches/tags just in case
+                            if repo_name:
+                                active_repos.add(repo_name)
+                            # Log creation event
+                            ref_type = event.get("payload", {}).get("ref_type")
+                            ref = event.get("payload", {}).get("ref", "unknown")
+                            activity_log.append(f"Created {ref_type} '{ref}' in {repo_name}")
                         elif event_type == "PullRequestEvent":
+                            repo_name = event.get("repo", {}).get("name", "unknown")
                             action = event.get("payload", {}).get("action")
                             title = event.get("payload", {}).get("pull_request", {}).get("title")
                             activity_log.append(f"PR {action} in {repo_name}: {title}")
-                        elif event_type == "CreateEvent":
-                             ref_type = event.get("payload", {}).get("ref_type")
-                             activity_log.append(f"Created {ref_type} in {repo_name}")
-                    
+                            
                     elif created_at < date:
-                        # Events are sorted by date, so if we go past the date, we can stop
-                        return "\n".join(activity_log) if activity_log else "No GitHub activity found for this date."
+                        # Events are sorted by date
+                        break
+                else:
+                    # Continue to next page if we haven't broken out of the loop (meaning we haven't passed the date yet)
+                    page += 1
+                    if page > 3: break
+                    continue
+                break # Break out of while loop if we hit older dates
 
-                page += 1
-                if page > 3: # Limit to 3 pages to avoid excessive requests
-                    break
-            
+            # 2. Fetch specific commits for active repositories
+            for repo in active_repos:
+                try:
+                    commits_url = f"https://api.github.com/repos/{repo}/commits"
+                    commit_params = {
+                        "author": username,
+                        "since": f"{date}T00:00:00Z",
+                        "until": f"{date}T23:59:59Z",
+                        "per_page": 100
+                    }
+                    
+                    # DEBUG: Fetching commits for repo
+                    print(f"DEBUG: Fetching commits for {repo}", file=sys.stderr)
+                    
+                    resp = await client.get(commits_url, headers=headers, params=commit_params)
+                    if resp.status_code == 200:
+                        commits = resp.json()
+                        print(f"DEBUG: Found {len(commits)} commits in {repo}", file=sys.stderr)
+                        
+                        for commit in commits:
+                            msg = commit.get("commit", {}).get("message", "").split('\n')[0] # First line only
+                            sha = commit.get("sha", "")[:7]
+                            activity_log.append(f"Commit in {repo}: {msg} ({sha})")
+                    else:
+                        print(f"DEBUG: Failed to fetch commits for {repo}: {resp.status_code}", file=sys.stderr)
+                        
+                except Exception as repo_err:
+                    print(f"DEBUG: Error fetching commits for {repo}: {repo_err}", file=sys.stderr)
+
             return "\n".join(activity_log) if activity_log else "No GitHub activity found for this date."
         except Exception as e:
             return f"Error fetching GitHub data: {str(e)}"
