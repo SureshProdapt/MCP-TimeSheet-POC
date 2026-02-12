@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import io
 from client import get_data
 from dotenv import load_dotenv
 
@@ -134,25 +135,69 @@ elif page == "Dashboard":
 
     # Display Data
     if st.session_state['timesheet_df'] is not None:
-        st.dataframe(
-            st.session_state['timesheet_df'], 
-            use_container_width=True,
-            column_config={
-                "Task Description": st.column_config.TextColumn(
-                    "Task Description",
-                    width="large"
-                ),
-                "Remark": st.column_config.TextColumn(
-                    "Remark",
-                    width="large"
-                )
-            }
-        )
+        st.markdown("### Timesheet Preview")
         
-        csv = st.session_state['timesheet_df'].to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download Timesheet as CSV",
-            data=csv,
-            file_name=f"timesheet_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-        )
+        # Custom CSS for table to wrap text
+        st.markdown("""
+        <style>
+        .timesheet-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        .timesheet-table th, .timesheet-table td {
+            border: 1px solid #e0e0e0;
+            padding: 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        .timesheet-table th {
+            background-color: #f0f2f6;
+            font-weight: 600;
+        }
+        .timesheet-table td {
+            white-space: pre-wrap; /* Ensures text wrapping and preserves newlines */
+            word-wrap: break-word;
+            max-width: 400px; /* Limit width of description/remark cols to force wrap if needed */
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        # Render HTML table
+        # escape=True ensures security, pre-wrap handles newlines
+        html_table = st.session_state['timesheet_df'].to_html(classes="timesheet-table", index=False, escape=True)
+        st.markdown(html_table, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            csv = st.session_state['timesheet_df'].to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📄 Download as CSV",
+                data=csv,
+                file_name=f"timesheet_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            
+        with col2:
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                st.session_state['timesheet_df'].to_excel(writer, index=False, sheet_name='Timesheet')
+                
+                # Auto-adjust column width (optional polish)
+                worksheet = writer.sheets['Timesheet']
+                for column_cells in worksheet.columns:
+                    length = max(len(str(cell.value)) for cell in column_cells)
+                    if length > 50: length = 50 # Cap width
+                    worksheet.column_dimensions[column_cells[0].column_letter].width = length + 2
+
+            st.download_button(
+                label="📊 Download as Excel",
+                data=buffer.getvalue(),
+                file_name=f"timesheet_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
