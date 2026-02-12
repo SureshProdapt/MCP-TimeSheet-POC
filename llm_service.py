@@ -24,17 +24,19 @@ def summarize_activity(jira_content: str, github_content: str, date: str) -> str
         return "LLM not configured. Raw Data gathered."
         
     prompt = f"""
-    Create a concise daily timesheet summary for the following activities on {date}.
+    Create a concise summary for the following task.
     
-    Jira Activity:
+    Task Details:
     {jira_content}
     
-    GitHub Activity:
+    Related GitHub Activity:
     {github_content}
     
-    Format the output as a single paragraph describing the work done.
-    Do NOT start with "Here is a summary" or similar intros. Start directly with the tasks.
+    Format the output as a single, concise paragraph describing the work done on this task.
+    Do NOT mention the date or start with "On [date]...". Start directly with the action verb or subject.
+    Focus ONLY on the work related to the provided task details.
     """
+    
     
     try:
         # Azure OpenAI Call (Commented out)

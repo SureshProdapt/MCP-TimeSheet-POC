@@ -20,13 +20,15 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 async def get_jira_activity(project_key: str, date: str) -> str:
     """
     Fetches Jira issues updated on a specific date for a given project.
+    Returns a JSON string of list of dicts.
     
     Args:
         project_key: The Jira project key (e.g., 'PROJ').
         date: The date to filter by (YYYY-MM-DD).
     """
+    import json
     if not JIRA_URL or not JIRA_API_TOKEN:
-        return f"Error: Jira credentials not configured. Please check your .env file."
+        return json.dumps({"error": "Jira credentials not configured."})
 
     jql = f"project = {project_key} AND updated >= '{date}' AND updated < '{date} 23:59'"
     
@@ -39,7 +41,7 @@ async def get_jira_activity(project_key: str, date: str) -> str:
             # Payload requires 'jql' and 'fields'
             payload = {
                 "jql": jql,
-                "fields": ["summary", "status", "updated"],
+                "fields": ["summary", "status", "updated", "description", "assignee", "project"],
                 "maxResults": 50
             }
             
@@ -68,25 +70,56 @@ async def get_jira_activity(project_key: str, date: str) -> str:
             issues = []
             for issue in issues_found:
                 key = issue.get("key")
-                summary = issue["fields"].get("summary")
-                status = issue["fields"]["status"].get("name")
-                issues.append(f"{key}: {summary} ({status})")
+                fields = issue.get("fields", {})
+                summary = fields.get("summary", "")
+                status = fields.get("status", {}).get("name", "")
+                project_name = fields.get("project", {}).get("name", "")
+                
+                # Extract Description (ADF format handling - simplified text extraction)
+                description_raw = fields.get("description")
+                description_text = ""
+                if description_raw and 'content' in description_raw:
+                     try:
+                        texts = []
+                        for block in description_raw.get('content', []):
+                            if 'content' in block:
+                                for span in block['content']:
+                                    if 'text' in span:
+                                        texts.append(span['text'])
+                        description_text = " ".join(texts)
+                     except:
+                         description_text = "Could not parse description."
+                
+                assignee_obj = fields.get("assignee")
+                assignee_name = assignee_obj.get("displayName") if assignee_obj else "Unassigned"
+
+                issues.append({
+                    "key": key,
+                    "summary": summary,
+                    "status": status,
+                    "description": description_text,
+                    "assignee_name": assignee_name,
+                    "project": project_name,
+                    "updated": fields.get("updated")
+                })
             
-            return "\n".join(issues) if issues else "No Jira activity found."
+            return json.dumps(issues)
         except Exception as e:
-            return f"Error fetching Jira data: {str(e)}"
+            return json.dumps({"error": f"Error fetching Jira data: {str(e)}"})
 
 @mcp.tool()
 async def get_github_activity(username: str, date: str) -> str:
     """
     Fetches GitHub activity for a user across all repositories on a specific date.
+    Returns JSON string.
     
     Args:
         username: The GitHub username.
         date: The date to filter by (YYYY-MM-DD).
     """
+    import json
     if not GITHUB_TOKEN:
-        return f"Error: GitHub token not configured. Please check your .env file."
+        return json.dumps({"error": "GitHub token not configured."})
 
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -100,7 +133,7 @@ async def get_github_activity(username: str, date: str) -> str:
             params = {"per_page": 100}
             
             active_repos = set()
-            activity_log = []
+            activity_list = []
             page = 1
             
             # Scan events to find active repos and non-commit events
@@ -123,24 +156,38 @@ async def get_github_activity(username: str, date: str) -> str:
                             if repo_name:
                                 active_repos.add(repo_name)
                         elif event_type == "CreateEvent":
-                            # Also check commits for new branches/tags just in case
                             if repo_name:
                                 active_repos.add(repo_name)
                             # Log creation event
                             ref_type = event.get("payload", {}).get("ref_type")
                             ref = event.get("payload", {}).get("ref", "unknown")
-                            activity_log.append(f"Created {ref_type} '{ref}' in {repo_name}")
+                            activity_list.append({
+                                "type": event_type,
+                                "repo": repo_name,
+                                "ref": ref,
+                                "ref_type": ref_type,
+                                "summary": f"Created {ref_type} '{ref}'",
+                                "key": f"create-{ref}-{created_at}"
+                            })
                         elif event_type == "PullRequestEvent":
                             repo_name = event.get("repo", {}).get("name", "unknown")
                             action = event.get("payload", {}).get("action")
                             title = event.get("payload", {}).get("pull_request", {}).get("title")
-                            activity_log.append(f"PR {action} in {repo_name}: {title}")
+                            pr_url = event.get("payload", {}).get("pull_request", {}).get("html_url")
+                            activity_list.append({
+                                "type": event_type,
+                                "repo": repo_name,
+                                "action": action,
+                                "summary": f"PR {action}: {title}",
+                                "key": pr_url,
+                                "description": f"Pull Request: {title} ({action})"
+                            })
                             
                     elif created_at < date:
                         # Events are sorted by date
                         break
                 else:
-                    # Continue to next page if we haven't broken out of the loop (meaning we haven't passed the date yet)
+                    # Continue to next page
                     page += 1
                     if page > 3: break
                     continue
@@ -166,18 +213,25 @@ async def get_github_activity(username: str, date: str) -> str:
                         print(f"DEBUG: Found {len(commits)} commits in {repo}", file=sys.stderr)
                         
                         for commit in commits:
-                            msg = commit.get("commit", {}).get("message", "").split('\n')[0] # First line only
-                            sha = commit.get("sha", "")[:7]
-                            activity_log.append(f"Commit in {repo}: {msg} ({sha})")
+                            msg = commit.get("commit", {}).get("message", "")
+                            sha = commit.get("sha", "")
+                            summary = msg.split('\n')[0]
+                            activity_list.append({
+                                "type": "Commit",
+                                "repo": repo,
+                                "key": sha,
+                                "summary": summary,
+                                "description": msg
+                            })
                     else:
                         print(f"DEBUG: Failed to fetch commits for {repo}: {resp.status_code}", file=sys.stderr)
                         
                 except Exception as repo_err:
                     print(f"DEBUG: Error fetching commits for {repo}: {repo_err}", file=sys.stderr)
 
-            return "\n".join(activity_log) if activity_log else "No GitHub activity found for this date."
+            return json.dumps(activity_list)
         except Exception as e:
-            return f"Error fetching GitHub data: {str(e)}"
+            return json.dumps({"error": f"Error fetching GitHub data: {str(e)}"})
 
 if __name__ == "__main__":
     mcp.run()

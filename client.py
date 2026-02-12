@@ -1,66 +1,158 @@
 import asyncio
 import os
-import csv
 import sys
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 import config
 from llm_service import summarize_activity
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-async def run_client():
+async def fetch_timesheet_data(credentials):
+    """
+    Fetches timesheet data using the provided credentials.
+    credentials: dict containing JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, GITHUB_TOKEN, etc.
+    Returns a list of dictionaries representing the timesheet entries.
+    """
+    
+    # Prepare environment variables for the subprocess
+    server_env = os.environ.copy()
+    server_env.update(credentials)
+
     # Define server parameters
     server_params = StdioServerParameters(
-        command=sys.executable, # Use the same python interpreter
+        command=sys.executable, 
         args=["mcp_server.py"],
-        env=os.environ.copy() # Pass current environment to subprocess
+        env=server_env
     )
+
+    timesheet_data = []
+
+    # Ensure logs directory exists
+    os.makedirs("logs", exist_ok=True)
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
-            # Initialize the connection
             await session.initialize()
 
-            # Get today's date
-            today = datetime.now().strftime("%Y-%m-%d")
+            # Calculate date range (last 5 days)
+            today = datetime.now()
+            dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(5)]
+            dates.reverse() # Oldest to newest
             
-            print(f"Fetching data for {today}...")
-            
-            # Fetch Jira Data
-            try:
-                jira_data = await session.call_tool("get_jira_activity", arguments={
-                    "project_key": config.JIRA_PROJECT_KEY, 
-                    "date": today
-                })
-                jira_content = jira_data.content[0].text
-            except Exception as e:
-                jira_content = f"Error fetching Jira: {e}"
+            project_key = credentials.get("JIRA_PROJECT_KEY", "PROJ")
+            github_user = credentials.get("GITHUB_USERNAME", "user")
 
-            # Fetch GitHub Data
-            try:
-                github_data = await session.call_tool("get_github_activity", arguments={
-                    "username": config.GITHUB_OWNER, 
-                    "date": today
-                })
-                github_content = github_data.content[0].text
-            except Exception as e:
-                github_content = f"Error fetching GitHub: {e}"
-
-            # Summarize with LLM
-            work_summary = summarize_activity(jira_content, github_content, today)
-
-            # Write to CSV
-            csv_file = "timesheet.csv"
-            file_exists = os.path.isfile(csv_file)
-            
-            with open(csv_file, mode='a', newline='', encoding='utf-8') as file:
-                writer = csv.writer(file)
-                if not file_exists:
-                    writer.writerow(["Date", "Work Done"])
+            for date in dates:
+                # print(f"Processing {date}...", file=sys.stderr)
                 
-                writer.writerow([today, work_summary])
-            
-            print(f"Timesheet updated for {today}.")
+                # --- Fetch Jira Data ---
+                daily_jira_entries = []
+                jira_raw_content = ""
+                try:
+                    jira_resp = await session.call_tool("get_jira_activity", arguments={
+                        "project_key": project_key, 
+                        "date": date
+                    })
+                    jira_raw_content = jira_resp.content[0].text
+                    
+                    if not jira_raw_content.startswith("Error") and "No Jira activity" not in jira_raw_content:
+                        try:
+                            jira_entries = json.loads(jira_raw_content)
+                            if isinstance(jira_entries, list):
+                                daily_jira_entries = jira_entries
+                        except json.JSONDecodeError:
+                            pass
+                except Exception as e:
+                    jira_raw_content = f"Error: {str(e)}"
 
-if __name__ == "__main__":
-    asyncio.run(run_client())
+                # --- Fetch GitHub Data ---
+                github_raw_content = ""
+                daily_github_entries = []
+                try:
+                    github_resp = await session.call_tool("get_github_activity", arguments={
+                        "username": github_user, 
+                        "date": date
+                    })
+                    github_raw_content = github_resp.content[0].text
+                    
+                    if not github_raw_content.startswith("Error") and "No GitHub activity" not in github_raw_content:
+                        try:
+                            github_entries = json.loads(github_raw_content)
+                            if isinstance(github_entries, list):
+                                daily_github_entries = github_entries
+                        except:
+                            pass
+                except Exception as e:
+                   github_raw_content = f"Error: {str(e)}"
+
+                # --- Save Raw Data ---
+                try:
+                    with open(f"logs/activity_{date}.json", "w") as f:
+                        json.dump({
+                            "date": date,
+                            "jira": daily_jira_entries,
+                            "github": daily_github_entries,
+                            "raw_jira_response": jira_raw_content,
+                            "raw_github_response": github_raw_content
+                        }, f, indent=2)
+                except Exception as e:
+                    print(f"Failed to save log for {date}: {e}", file=sys.stderr)
+
+                # --- Select Best Task ---
+                selected_entry = None
+                if daily_jira_entries:
+                    # Prioritize: Done/Completed > In Progress > Others
+                    def get_priority(entry):
+                        status = entry.get("status", "").lower()
+                        if status in ["done", "completed", "verified", "closed", "resolved"]:
+                            return 0
+                        elif status == "in progress":
+                            return 1
+                        else:
+                            return 2
+                    
+                    # Sort by priority, then maybe by key or something stable
+                    daily_jira_entries.sort(key=get_priority)
+                    selected_entry = daily_jira_entries[0]
+
+                # --- Prepare LLM Context ---
+                jira_context = ""
+                if selected_entry:
+                    jira_context = f"{selected_entry['key']}: {selected_entry['summary']}\nDescription: {selected_entry.get('description', '')[:500]}"
+                
+                github_context = ""
+                if daily_github_entries:
+                    github_context = "\n".join([f"- {i['summary']}" for i in daily_github_entries])
+
+                # --- Generate Summary ---
+                daily_summary = ""
+                if selected_entry or github_context:
+                    daily_summary = summarize_activity(jira_context, github_context, date)
+
+                # --- Create Timesheet Row ---
+                if selected_entry:
+                    timesheet_data.append({
+                        "Date": date,
+                        "Project": selected_entry.get("project", project_key),
+                        "Task": selected_entry.get("summary"),
+                        "Task Description": selected_entry.get("description", ""),
+                        "Status": selected_entry.get("status"),
+                        "Remark": daily_summary 
+                    })
+                elif github_context:
+                    # Fallback if no Jira but GitHub activity exists
+                    timesheet_data.append({
+                        "Date": date,
+                        "Project": "GitHub/General",
+                        "Task": "General Development Activities",
+                        "Task Description": "See Remarks for details.",
+                        "Status": "Completed", # Assumption for general work
+                        "Remark": daily_summary
+                    })
+
+    return timesheet_data
+
+# Wrapper to run loop
+def get_data(credentials):
+    return asyncio.run(fetch_timesheet_data(credentials))
