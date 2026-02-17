@@ -153,6 +153,114 @@ async def fetch_timesheet_data(credentials):
 
     return timesheet_data
 
+
+def scan_logs(limit=5, exclude_dates=None):
+    """
+    Scans the logs directory for recent activity files and constructs timesheet data.
+    Filters for days where Jira activity was found.
+    exclude_dates: list of date strings to skip (e.g. ["2026-02-12"])
+    """
+    logs_dir = "logs"
+    if not os.path.exists(logs_dir):
+        return []
+    
+    if exclude_dates is None:
+        exclude_dates = []
+
+    log_files = [f for f in os.listdir(logs_dir) if f.startswith("activity_") and f.endswith(".json")]
+    log_files.sort(reverse=True) # Newest first
+
+    fallback_data = []
+    count = 0
+
+    for log_file in log_files:
+        if count >= limit:
+            break
+            
+        try:
+            with open(os.path.join(logs_dir, log_file), "r") as f:
+                data = json.load(f)
+                
+            date = data.get("date")
+            
+            # Skip if date is already in the main list
+            if date in exclude_dates:
+                continue
+
+            jira_entries = data.get("jira", [])
+            github_entries = data.get("github", [])
+            
+            # STRICT REQUIREMENT: Only include if Jira activity was found
+            if not jira_entries:
+                continue
+
+            # --- Logic Reuse: Select Best Task & Summary ---
+            # Select Best Task
+            selected_entry = None
+            if jira_entries:
+                 def get_priority(entry):
+                    status = entry.get("status", "").lower()
+                    if status in ["done", "completed", "verified", "closed", "resolved"]:
+                        return 0
+                    elif status == "in progress":
+                        return 1
+                    else:
+                        return 2
+                 jira_entries.sort(key=get_priority)
+                 selected_entry = jira_entries[0]
+
+            jira_context = ""
+            if selected_entry:
+                jira_context = f"{selected_entry['key']}: {selected_entry['summary']}\nDescription: {selected_entry.get('description', '')[:500]}"
+            
+            github_context = ""
+            if github_entries:
+                github_context = "\n".join([f"- {i['summary']}" for i in github_entries])
+            
+            daily_summary = ""
+            if selected_entry or github_context:
+                 daily_summary = summarize_activity(jira_context, github_context, date)
+
+            # Create Row (Only Jira driven as per requirement)
+            if selected_entry:
+                fallback_data.append({
+                    "Date": date,
+                    "Project": selected_entry.get("project", "Unknown"),
+                    "Task": selected_entry.get("summary"),
+                    "Task Description": selected_entry.get("description", ""),
+                    "Status": selected_entry.get("status"),
+                    "Remark": daily_summary 
+                })
+            
+            count += 1
+            
+        except Exception as e:
+            print(f"Error parsing log {log_file}: {e}", file=sys.stderr)
+
+    return fallback_data
+
 # Wrapper to run loop
 def get_data(credentials):
-    return asyncio.run(fetch_timesheet_data(credentials))
+    data = asyncio.run(fetch_timesheet_data(credentials))
+    
+    # Check if we have enough days (aiming for 5)
+    desired_days = 5
+    current_count = len(data)
+    
+    if current_count < desired_days:
+        needed = desired_days - current_count
+        # Collect dates we already have
+        existing_dates = [row['Date'] for row in data]
+        
+        print(f"Only found {current_count} days from API. Backfilling {needed} days from logs...", file=sys.stderr)
+        
+        # Scan logs for the rest
+        backfill_data = scan_logs(limit=needed, exclude_dates=existing_dates)
+        
+        # Combine
+        data.extend(backfill_data)
+        
+        # Sort by Date descending (newest first) to keep it tidy
+        data.sort(key=lambda x: x['Date'], reverse=True)
+        
+    return data
