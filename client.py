@@ -8,11 +8,54 @@ from llm_service import summarize_activity
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-async def fetch_timesheet_data(credentials):
+def get_dates_in_range(start_date, end_date):
     """
-    Fetches timesheet data using the provided credentials.
-    credentials: dict containing JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, GITHUB_TOKEN, etc.
-    Returns a list of dictionaries representing the timesheet entries.
+    Returns a list of date strings (YYYY-MM-DD) between start_date and end_date (inclusive).
+    start_date and end_date can be datetime objects or strings.
+    """
+    if isinstance(start_date,  str):
+        start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+    # Handle pandas timestamp or other date objects if needed, assuming date objects for now based on app.py
+    
+    if isinstance(end_date, str):
+         end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    delta = (end_date - start_date).days
+    dates = []
+    for i in range(delta + 1):
+        day = start_date + timedelta(days=i)
+        dates.append(day.strftime("%Y-%m-%d"))
+    return dates
+
+def find_last_in_progress_task(current_date_str, lookback_days=5):
+    """
+    Scans logs backwards from current_date to find the most recent 'In Progress' Jira task.
+    Returns the task dict or None.
+    """
+    current_date = datetime.strptime(current_date_str, "%Y-%m-%d")
+    
+    for i in range(1, lookback_days + 1):
+        check_date = current_date - timedelta(days=i)
+        check_date_str = check_date.strftime("%Y-%m-%d")
+        log_file = f"logs/activity_{check_date_str}.json"
+        
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r") as f:
+                    data = json.load(f)
+                    jira_entries = data.get("jira", [])
+                    
+                    # Look for In Progress tasks
+                    for entry in jira_entries:
+                        if entry.get("status", "").lower() == "in progress":
+                            return entry
+            except Exception:
+                continue
+    return None
+
+async def fetch_timesheet_data(credentials, start_date, end_date):
+    """
+    Fetches timesheet data using the provided credentials and date range.
     """
     
     # Prepare environment variables for the subprocess
@@ -35,17 +78,27 @@ async def fetch_timesheet_data(credentials):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            # Calculate date range (last 5 days)
-            today = datetime.now()
-            dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(5)]
-            dates.reverse() # Oldest to newest
+            dates = get_dates_in_range(start_date, end_date)
+            dates.reverse() # Newest to oldest usually prefers, but loop can be distinct. 
+            # Actually, standard timesheet is usually chronological? 
+            # Existing code did: dates.reverse() # Oldest to newest?
+            # client.py L41: dates.reverse()
+            # L40 generated [today, today-1...]. so reverse makes it [today-4, ... today].
             
+            # Let's process chronological (Oldest to Newest) so "In Progress" logic makes sense if we generated logs sequentially?
+            # Actually "find_last_in_progress_task" looks at *logs*.
+            # Processing order doesn't strictly matter for *generation* if we rely on stored logs, 
+            # BUT efficient carry-over might benefit from knowing the previous day.
+            # However, the requirement is to look back 5 days *from the empty day*.
+            # So regardless of processing order, we look at the file system.
+            
+            # We'll stick to Oldest -> Newest (Chronological)
+            dates.sort() 
+
             project_key = credentials.get("JIRA_PROJECT_KEY", "PROJ")
             github_user = credentials.get("GITHUB_USERNAME", "user")
 
             for date in dates:
-                # print(f"Processing {date}...", file=sys.stderr)
-                
                 # --- Fetch Jira Data ---
                 daily_jira_entries = []
                 jira_raw_content = ""
@@ -112,7 +165,6 @@ async def fetch_timesheet_data(credentials):
                         else:
                             return 2
                     
-                    # Sort by priority, then maybe by key or something stable
                     daily_jira_entries.sort(key=get_priority)
                     selected_entry = daily_jira_entries[0]
 
@@ -147,120 +199,45 @@ async def fetch_timesheet_data(credentials):
                         "Project": "GitHub/General",
                         "Task": "General Development Activities",
                         "Task Description": "See Remarks for details.",
-                        "Status": "Completed", # Assumption for general work
+                        "Status": "Completed", 
                         "Remark": daily_summary
                     })
+                else:
+                    # NO ACTIVITY FOUND
+                    # Check for "In Progress" logic from previous days
+                    last_task = find_last_in_progress_task(date)
+                    
+                    if last_task:
+                        timesheet_data.append({
+                            "Date": date,
+                            "Project": last_task.get("project", project_key),
+                            "Task": last_task.get("summary"),
+                            "Task Description": last_task.get("description", ""),
+                            "Status": "In Progress",
+                            "Remark": f"Continuing work on {last_task.get('summary')}."
+                        })
+                    else:
+                        timesheet_data.append({
+                            "Date": date,
+                            "Project": "N/A",
+                            "Task": "N/A",
+                            "Task Description": "No GitHub activity / work found",
+                            "Status": "N/A",
+                            "Remark": "No activity found."
+                        })
 
     return timesheet_data
 
 
-def scan_logs(limit=5, exclude_dates=None):
-    """
-    Scans the logs directory for recent activity files and constructs timesheet data.
-    Filters for days where Jira activity was found.
-    exclude_dates: list of date strings to skip (e.g. ["2026-02-12"])
-    """
-    logs_dir = "logs"
-    if not os.path.exists(logs_dir):
-        return []
+def get_data(credentials, start_date=None, end_date=None):
+    # Default fallback if not provided (though UI restricts this)
+    if not start_date or not end_date:
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=5)
+
+    data = asyncio.run(fetch_timesheet_data(credentials, start_date, end_date))
     
-    if exclude_dates is None:
-        exclude_dates = []
-
-    log_files = [f for f in os.listdir(logs_dir) if f.startswith("activity_") and f.endswith(".json")]
-    log_files.sort(reverse=True) # Newest first
-
-    fallback_data = []
-    count = 0
-
-    for log_file in log_files:
-        if count >= limit:
-            break
-            
-        try:
-            with open(os.path.join(logs_dir, log_file), "r") as f:
-                data = json.load(f)
-                
-            date = data.get("date")
-            
-            # Skip if date is already in the main list
-            if date in exclude_dates:
-                continue
-
-            jira_entries = data.get("jira", [])
-            github_entries = data.get("github", [])
-            
-            # STRICT REQUIREMENT: Only include if Jira activity was found
-            if not jira_entries:
-                continue
-
-            # --- Logic Reuse: Select Best Task & Summary ---
-            # Select Best Task
-            selected_entry = None
-            if jira_entries:
-                 def get_priority(entry):
-                    status = entry.get("status", "").lower()
-                    if status in ["done", "completed", "verified", "closed", "resolved"]:
-                        return 0
-                    elif status == "in progress":
-                        return 1
-                    else:
-                        return 2
-                 jira_entries.sort(key=get_priority)
-                 selected_entry = jira_entries[0]
-
-            jira_context = ""
-            if selected_entry:
-                jira_context = f"{selected_entry['key']}: {selected_entry['summary']}\nDescription: {selected_entry.get('description', '')[:500]}"
-            
-            github_context = ""
-            if github_entries:
-                github_context = "\n".join([f"- {i['summary']}" for i in github_entries])
-            
-            daily_summary = ""
-            if selected_entry or github_context:
-                 daily_summary = summarize_activity(jira_context, github_context, date)
-
-            # Create Row (Only Jira driven as per requirement)
-            if selected_entry:
-                fallback_data.append({
-                    "Date": date,
-                    "Project": selected_entry.get("project", "Unknown"),
-                    "Task": selected_entry.get("summary"),
-                    "Task Description": selected_entry.get("description", ""),
-                    "Status": selected_entry.get("status"),
-                    "Remark": daily_summary 
-                })
-            
-            count += 1
-            
-        except Exception as e:
-            print(f"Error parsing log {log_file}: {e}", file=sys.stderr)
-
-    return fallback_data
-
-# Wrapper to run loop
-def get_data(credentials):
-    data = asyncio.run(fetch_timesheet_data(credentials))
-    
-    # Check if we have enough days (aiming for 5)
-    desired_days = 5
-    current_count = len(data)
-    
-    if current_count < desired_days:
-        needed = desired_days - current_count
-        # Collect dates we already have
-        existing_dates = [row['Date'] for row in data]
-        
-        print(f"Only found {current_count} days from API. Backfilling {needed} days from logs...", file=sys.stderr)
-        
-        # Scan logs for the rest
-        backfill_data = scan_logs(limit=needed, exclude_dates=existing_dates)
-        
-        # Combine
-        data.extend(backfill_data)
-        
-        # Sort by Date descending (newest first) to keep it tidy
-        data.sort(key=lambda x: x['Date'], reverse=True)
+    # Sort by Date descending (newest first) for display
+    data.sort(key=lambda x: x['Date'], reverse=True)
         
     return data

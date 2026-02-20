@@ -113,7 +113,32 @@ elif page == "Dashboard":
     st.title("Timesheet Dashboard")
     
     st.markdown("### Generate Timesheet")
-    st.markdown("Fetch data from the last 5 days based on your configuration.")
+    st.markdown("### Generate Timesheet")
+    st.markdown("Fetch data based on your configuration and selected date range.")
+
+    # Date Range Picker
+    today = pd.Timestamp.now().date()
+    default_start = today - pd.Timedelta(days=5)
+    default_end = today
+    
+    date_range = st.date_input(
+        "Select Date Range",
+        value=(default_start, default_end),
+        max_value=today,
+        format="DD/MM/YYYY"
+    )
+
+    start_date = None
+    end_date = None
+
+    if isinstance(date_range, tuple):
+        if len(date_range) == 2:
+            start_date = date_range[0]
+            end_date = date_range[1]
+        elif len(date_range) == 1:
+            start_date = date_range[0]
+            end_date = start_date # If only one date selected, treat as single day range
+
     
     if st.button("Generate Timesheet"):
         creds = st.session_state['credentials']
@@ -128,60 +153,92 @@ elif page == "Dashboard":
         elif not creds["GITHUB_TOKEN"]:
             st.error("GitHub Token is missing. Please configure it in the Credentials tab.")
         else:
-            with st.spinner("Fetching data from Jira and GitHub... This may take a minute..."):
-                try:
-                    # Pass credentials to client
-                    # We need to map GITHUB_USERNAME to GITHUB_OWNER if config.py uses it so.
-                    # client.py logic uses: project_key = credentials.get("JIRA_PROJECT_KEY")
-                    # github_user = credentials.get("GITHUB_USERNAME")
-                    
-                    data = get_data(creds)
-                    
-                    if not data:
-                        st.warning("No activity found for the past 5 days.")
-                    else:
-                        # Process data into desired columns
-                        # Columns: Employee Id | Employee Name | Date | Project | Task | Task Description | Authorized Hours | Billable | Role | site | status | Remark
-                        
-                        colored_data = []
-                        for row in data:
-                            colored_data.append({
-                                "Employee ID": creds["EMPLOYEE_ID"],
-                                "Employee Name": creds["EMPLOYEE_NAME"],
-                                "Date": pd.to_datetime(row["Date"]).strftime('%d-%m-%Y'),
-                                "Project": row["Project"],
-                                "Activity / Process / Transaction": creds["ACTIVITY_PROCESS_TRANSACTION"],
-                                "Task": row["Task"],
-                                "Task Description": row["Task Description"],
-                                "Authorized Hours": creds["AUTHORIZED_HOURS"],
-                                "Authorized Units": creds["AUTHORIZED_UNITS"],
-                                "UOM": creds["UOM"],
-                                "Billable": creds["BILLABLE"],
-                                "Site": creds["SITE"],
-                                "Role": creds["ROLE"],
-                                "Location": creds["LOCATION"],
-                                "Work Item": creds["WORK_ITEM"],
-                                "Analysis Code": creds["ANALYSIS_CODE"],
-                                "Remarks": row["Remark"],
-                                "Status": row["Status"],
-                                "Booked Hours": creds["BOOKED_HOURS"],
-                                "Booked Units": creds["BOOKED_UNITS"],
-                                "Planned Hours": creds["PLANNED_HOURS"],
-                                "Balance Hours": creds["BALANCE_HOURS"]
-                            })
-                        
-                        df = pd.DataFrame(colored_data)
-                        st.session_state['timesheet_df'] = df
-                        st.success("Timesheet generated successfully!")
-                        
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
+                if not start_date or not end_date:
+                    st.error("Please select a valid date range.")
+                else:
+                    with st.spinner(f"Fetching data from {start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}..."):
+                        try:
+                            # Pass credentials to client
+                            # We need to map GITHUB_USERNAME to GITHUB_OWNER if config.py uses it so.
+                            # client.py logic uses: project_key = credentials.get("JIRA_PROJECT_KEY")
+                            # github_user = credentials.get("GITHUB_USERNAME")
+                            
+                            data = get_data(creds, start_date=start_date, end_date=end_date)
+                            
+                            if not data:
+                                st.warning("No activity found for the selected date range.")
+                            else:
+                                # Process data into desired columns
+                                # Columns: Employee Id | Employee Name | Date | Project | Task | Task Description | Authorized Hours | Billable | Role | site | status | Remark
+                                
+                                colored_data = []
+                                for row in data:
+                                    colored_data.append({
+                                        "Employee ID": creds["EMPLOYEE_ID"],
+                                        "Employee Name": creds["EMPLOYEE_NAME"],
+                                        "Date": pd.to_datetime(row["Date"]).strftime('%d-%m-%Y'),
+                                        "Project": row["Project"],
+                                        "Activity / Process / Transaction": creds["ACTIVITY_PROCESS_TRANSACTION"],
+                                        "Task": row["Task"],
+                                        "Task Description": row["Task Description"],
+                                        "Authorized Hours": creds["AUTHORIZED_HOURS"],
+                                        "Authorized Units": creds["AUTHORIZED_UNITS"],
+                                        "UOM": creds["UOM"],
+                                        "Billable": creds["BILLABLE"],
+                                        "Site": creds["SITE"],
+                                        "Role": creds["ROLE"],
+                                        "Location": creds["LOCATION"],
+                                        "Work Item": creds["WORK_ITEM"],
+                                        "Analysis Code": creds["ANALYSIS_CODE"],
+                                        "Remarks": row["Remark"],
+                                        "Status": row["Status"],
+                                        "Booked Hours": creds["BOOKED_HOURS"],
+                                        "Booked Units": creds["BOOKED_UNITS"],
+                                        "Planned Hours": creds["PLANNED_HOURS"],
+                                        "Balance Hours": creds["BALANCE_HOURS"]
+                                    })
+                                
+                                df = pd.DataFrame(colored_data)
+                                st.session_state['timesheet_df'] = df
+                                st.success("Timesheet generated successfully!")
+                                
+                        except Exception as e:
+                            st.error(f"An error occurred: {str(e)}")
 
     # Display Data
     if st.session_state['timesheet_df'] is not None:
         st.markdown("### Timesheet Preview")
+
+        # --- Column Selection ---
+        df = st.session_state['timesheet_df']
+        all_columns = list(df.columns)
         
-        # Custom CSS for table to wrap text and improve column width
+        # Use st.popover for a cleaner "dropdown-like" UI with checkboxes
+        # Requires Streamlit >= 1.33.0
+        try:
+             # Using a funnel/filter icon often represented by :material/filter_alt: or similar in new streamlit
+             # Funnel icon: :material/filter_list:
+             filter_container = st.popover("Filter Columns", icon=":material/filter_alt:")
+        except AttributeError:
+             # Fallback for older Streamlit versions
+             filter_container = st.expander("Filter Columns")
+
+        selected_columns = []
+        with filter_container:
+            st.write("Uncheck to hide columns:")
+            for col in all_columns:
+                # Default to True (checked)
+                if st.checkbox(col, value=True, key=f"chk_{col}"):
+                    selected_columns.append(col)
+        
+        if selected_columns:
+            display_df = df[selected_columns]
+        else:
+            st.warning("No columns selected! Showing all columns.")
+            display_df = df
+
+        
+        # Custom CSS for table to wrap text and improve column width, AND fix Date Picker range highlighting
         st.markdown("""
         <style>
         .timesheet-table {
@@ -217,12 +274,22 @@ elif page == "Dashboard":
             min-width: 120px;
             white-space: nowrap;
         }
+        
+        /* Fix for Date Picker Range Highlighting */
+        /* These selectors target BaseWeb calendar components used by Streamlit */
+        div[data-baseweb="calendar"] div[aria-selected="true"] {
+            background-color: #FF4B4B !important; /* Streamlit Red/Primary */
+            color: white !important;
+        }
+        /* Try to target the range between start and end - often uses --in-range generic class or sibling logic which is hard in CSS alone */
+        /* However, ensuring the selected days are bold/colored helps. */
+        /* Streamlit usually handles the range background via js/inline styles, forcing it here might be tricky without exact classes */
         </style>
         """, unsafe_allow_html=True)
 
         # Render HTML table
         # escape=True ensures security, pre-wrap handles newlines
-        html_table = st.session_state['timesheet_df'].to_html(classes="timesheet-table", index=False, escape=True)
+        html_table = display_df.to_html(classes="timesheet-table", index=False, escape=True)
         st.markdown(html_table, unsafe_allow_html=True)
         
         st.markdown("---")
@@ -230,7 +297,7 @@ elif page == "Dashboard":
         col1, col2 = st.columns(2)
         
         with col1:
-            csv = st.session_state['timesheet_df'].to_csv(index=False).encode('utf-8')
+            csv = display_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📄 Download as CSV",
                 data=csv,
@@ -242,7 +309,7 @@ elif page == "Dashboard":
         with col2:
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                st.session_state['timesheet_df'].to_excel(writer, index=False, sheet_name='Timesheet')
+                display_df.to_excel(writer, index=False, sheet_name='Timesheet')
                 
                 # Auto-adjust column width (optional polish)
                 worksheet = writer.sheets['Timesheet']
