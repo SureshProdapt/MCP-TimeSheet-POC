@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import io
+import json
 from client import get_data
 from dotenv import load_dotenv
 
@@ -42,7 +43,7 @@ if 'timesheet_df' not in st.session_state:
     st.session_state['timesheet_df'] = None
 
 # Sidebar Navigation
-page = st.sidebar.radio("Navigation", ["Dashboard", "Credentials"])
+page = st.sidebar.radio("Navigation", ["Dashboard", "Productivity Insights", "Credentials"])
 
 if page == "Credentials":
     st.header("Configuration")
@@ -325,3 +326,101 @@ elif page == "Dashboard":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
+
+elif page == "Productivity Insights":
+    st.title("Productivity Insights")
+    st.markdown("Analyze your productivity across Jira and GitHub based on historical logs.")
+    
+    # Reuse date picker logic
+    today = pd.Timestamp.now().date()
+    default_start = today - pd.Timedelta(days=5)
+    default_end = today
+    
+    date_range = st.date_input(
+        "Select Date Range",
+        value=(default_start, default_end),
+        max_value=today,
+        format="DD/MM/YYYY"
+    )
+
+    start_date = None
+    end_date = None
+
+    if isinstance(date_range, tuple):
+        if len(date_range) == 2:
+            start_date = date_range[0]
+            end_date = date_range[1]
+        elif len(date_range) == 1:
+            start_date = date_range[0]
+            end_date = start_date
+
+    if st.button("Generate Productivity Insights"):
+        if not start_date or not end_date:
+            st.error("Please select a valid date range.")
+        else:
+            with st.spinner(f"Analyzing logs from {start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}..."):
+                try:
+                    from client import generate_productivity_insights
+                    insights = generate_productivity_insights(str(start_date), str(end_date))
+                    st.session_state['insights_data'] = insights
+                    st.success("Insights generated successfully!")
+                except Exception as e:
+                    st.error(f"An error occurred: {str(e)}")
+
+    if 'insights_data' in st.session_state and st.session_state['insights_data']:
+        insights = st.session_state['insights_data']
+        
+        st.markdown("### Overview")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Active Days", insights['consistency']['active_days'])
+        col2.metric("Total Commits", insights['commit_metrics']['total_commits'])
+        col3.metric("Tickets Touched", insights['jira_metrics']['total_tickets_touched'])
+        col4.metric("Tickets Completed", insights['jira_metrics']['tickets_completed'])
+        
+        col_left, col_right = st.columns(2)
+        
+        with col_left:
+            st.markdown("#### Commit Metrics")
+            commits_per_day = insights['commit_metrics']['commits_per_day']
+            if sum(commits_per_day.values()) > 0:
+                st.bar_chart(pd.Series(commits_per_day, name="Commits"))
+            else:
+                st.info("No commits found in the selected range.")
+                
+            st.markdown("#### Repositories")
+            if insights['commit_metrics']['commits_per_repo']:
+                st.table(pd.Series(insights['commit_metrics']['commits_per_repo'], name="Commits"))
+            else:
+                st.info("No repository activity found.")
+            
+        with col_right:
+            st.markdown("#### Jira Metrics")
+            st.write(f"**In Progress Tickets:** {insights['jira_metrics']['tickets_in_progress']}")
+            st.write(f"**Avg Days Active:** {insights['jira_metrics']['average_days_active']} days")
+            
+            st.markdown("#### Work Distribution")
+            st.write("**Projects (%):**")
+            if insights['distribution']['project_distribution_percent']:
+                st.table(pd.Series(insights['distribution']['project_distribution_percent'], name="%"))
+            else:
+                st.info("No Jira projects touched.")
+            
+            st.write("**Repos (%):**")
+            if insights['distribution']['repo_distribution_percent']:
+                st.table(pd.Series(insights['distribution']['repo_distribution_percent'], name="%"))
+            else:
+                st.info("No Github repos touched.")
+            
+        st.markdown("#### Consistency")
+        st.write(f"- **Longest Inactivity Streak:** {insights['consistency']['longest_inactivity_streak_days']} days (excluding missing days from start date to first activity)")
+        st.write(f"- **Context Switching Days** (> 2 projects/repos modified): {insights['consistency']['context_switching_days']}")
+        
+        st.markdown("---")
+        json_str = json.dumps(insights, indent=2)
+        st.download_button(
+            label="📄 Download Insights (JSON)",
+            data=json_str,
+            file_name=f"productivity_insights_{insights['date_range']['start']}_to_{insights['date_range']['end']}.json",
+            mime="application/json",
+            use_container_width=True
+        )

@@ -241,3 +241,149 @@ def get_data(credentials, start_date=None, end_date=None):
     data.sort(key=lambda x: x['Date'], reverse=True)
         
     return data
+
+def _normalize_jira_status(status: str) -> str:
+    return (status or "").strip().lower()
+
+def _load_logs_in_range(start_date, end_date):
+    dates = get_dates_in_range(start_date, end_date)
+    logs = []
+    for date_str in dates:
+        log_file = f"logs/activity_{date_str}.json"
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r") as f:
+                    data = json.load(f)
+                    data['date'] = date_str
+                    logs.append(data)
+            except Exception:
+                continue
+    return logs
+
+def generate_productivity_insights(start_date, end_date) -> dict:
+    logs = _load_logs_in_range(start_date, end_date)
+    
+    total_commits = 0
+    commits_per_day = {}
+    commits_per_repo = {}
+    
+    total_jira_touched = 0
+    tickets_completed = 0
+    tickets_in_progress = 0
+    in_progress_durations = {} 
+    
+    jira_projects = {}
+    
+    active_days_count = 0
+    inactivity_streak = 0
+    longest_inactivity_streak = 0
+    
+    context_switching_days = []
+    
+    dates = get_dates_in_range(start_date, end_date)
+    
+    for date_str in dates:
+        commits_per_day[date_str] = 0
+        
+        day_log = next((l for l in logs if l.get('date') == date_str), None)
+        
+        if not day_log:
+            inactivity_streak += 1
+            if inactivity_streak > longest_inactivity_streak:
+                longest_inactivity_streak = inactivity_streak
+            continue
+            
+        jira_entries = day_log.get('jira', [])
+        github_entries = day_log.get('github', [])
+        
+        if not jira_entries and not github_entries:
+            inactivity_streak += 1
+            if inactivity_streak > longest_inactivity_streak:
+                longest_inactivity_streak = inactivity_streak
+        else:
+            active_days_count += 1
+            inactivity_streak = 0
+            
+        commits_per_day[date_str] = len(github_entries)
+        total_commits += len(github_entries)
+        
+        daily_repos = set()
+        for gh in github_entries:
+            repo = gh.get('repository', 'Unknown')
+            daily_repos.add(repo)
+            commits_per_repo[repo] = commits_per_repo.get(repo, 0) + 1
+            
+        daily_projects = set()
+        for jira in jira_entries:
+            key = jira.get('key')
+            if not key: continue
+            
+            project = jira.get('project', 'Unknown')
+            daily_projects.add(project)
+            jira_projects[project] = jira_projects.get(project, 0) + 1
+            
+            status = _normalize_jira_status(jira.get('status'))
+            
+            if key not in in_progress_durations:
+                in_progress_durations[key] = {'first_seen': date_str, 'last_seen': date_str, 'statuses': set()}
+            in_progress_durations[key]['last_seen'] = date_str
+            in_progress_durations[key]['statuses'].add(status)
+            
+        if len(daily_repos) + len(daily_projects) > 2:
+            context_switching_days.append(date_str)
+            
+    total_jira_touched = len(in_progress_durations)
+    
+    completed_statuses = {"done", "closed", "resolved", "verified", "completed"}
+    in_progress_times = []
+    
+    for key, data in in_progress_durations.items():
+        statuses = data['statuses']
+        if any(s in completed_statuses for s in statuses):
+            tickets_completed += 1
+        elif "in progress" in statuses:
+            tickets_in_progress += 1
+            
+        first_date = datetime.strptime(data['first_seen'], "%Y-%m-%d").date()
+        last_date = datetime.strptime(data['last_seen'], "%Y-%m-%d").date()
+        days_active = (last_date - first_date).days + 1
+        in_progress_times.append(days_active)
+        
+    avg_time_in_progress = sum(in_progress_times) / len(in_progress_times) if in_progress_times else 0.0
+    
+    total_jira_activity = sum(jira_projects.values())
+    project_distribution = {k: round((v / total_jira_activity) * 100, 2) for k, v in jira_projects.items()} if total_jira_activity else {}
+    
+    total_gh_activity = total_commits
+    repo_distribution = {k: round((v / total_gh_activity) * 100, 2) for k, v in commits_per_repo.items()} if total_gh_activity else {}
+    
+    return {
+        "date_range": {
+            "start": str(start_date),
+            "end": str(end_date)
+        },
+        "commit_metrics": {
+            "total_commits": total_commits,
+            "commits_per_day": commits_per_day,
+            "commits_per_repo": commits_per_repo
+        },
+        "jira_metrics": {
+            "total_tickets_touched": total_jira_touched,
+            "tickets_completed": tickets_completed,
+            "tickets_in_progress": tickets_in_progress,
+            "average_days_active": round(avg_time_in_progress, 2)
+        },
+        "distribution": {
+            "project_distribution_percent": project_distribution,
+            "repo_distribution_percent": repo_distribution
+        },
+        "consistency": {
+            "active_days": active_days_count,
+            "longest_inactivity_streak_days": longest_inactivity_streak,
+            "context_switching_days": len(context_switching_days)
+        },
+        "raw_counts": {
+            "Total Jira Updates": total_jira_activity,
+            "Total Github Updates": total_gh_activity
+        }
+    }
