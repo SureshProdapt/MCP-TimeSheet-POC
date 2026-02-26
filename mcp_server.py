@@ -19,9 +19,10 @@ JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 @mcp.tool()
-async def get_jira_activity(project_key: str, date: str) -> str:
+async def get_jira_activity(project_key: str, date: str, fetch_worklogs: bool = False) -> str:
     """
     Fetches Jira issues updated on a specific date for a given project.
+    Optionally fetches worklogs for each issue.
     Returns a JSON string of list of dicts.
     
     Args:
@@ -95,6 +96,35 @@ async def get_jira_activity(project_key: str, date: str) -> str:
                 assignee_obj = fields.get("assignee")
                 assignee_name = assignee_obj.get("displayName") if assignee_obj else "Unassigned"
 
+                # Fetch Worklogs if requested
+                worklogs = []
+                if fetch_worklogs:
+                    try:
+                        wl_url = f"{JIRA_URL}/rest/api/3/issue/{key}/worklog"
+                        wl_resp = await client.get(
+                            wl_url,
+                            auth=(JIRA_EMAIL, JIRA_API_TOKEN),
+                            headers={"Accept": "application/json"}
+                        )
+                        if wl_resp.status_code == 200:
+                            wl_data = wl_resp.json()
+                            for wl in wl_data.get("worklogs", []):
+                                author_obj = wl.get("author", {})
+                                author_name = author_obj.get("displayName", "Unknown")
+                                author_email = author_obj.get("emailAddress", "")
+                                started_full = wl.get("started", "")
+                                started_date = started_full[:10] if started_full else ""
+                                time_spent_sec = wl.get("timeSpentSeconds", 0)
+                                worklogs.append({
+                                    "author": author_name,
+                                    "author_email": author_email,
+                                    "date": started_date,
+                                    "time_spent_seconds": time_spent_sec
+                                })
+                    except Exception as wl_err:
+                        # Log error but do not fail the generation
+                        print(f"DEBUG: Error fetching worklog for {key}: {wl_err}", file=sys.stderr)
+
                 issues.append({
                     "key": key,
                     "summary": summary,
@@ -102,7 +132,8 @@ async def get_jira_activity(project_key: str, date: str) -> str:
                     "description": description_text,
                     "assignee_name": assignee_name,
                     "project": project_name,
-                    "updated": fields.get("updated")
+                    "updated": fields.get("updated"),
+                    "worklogs": worklogs
                 })
             
             return json.dumps(issues)

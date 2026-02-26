@@ -43,7 +43,26 @@ if 'timesheet_df' not in st.session_state:
     st.session_state['timesheet_df'] = None
 
 # Sidebar Navigation
-page = st.sidebar.radio("Navigation", ["Dashboard", "Productivity Insights", "Credentials"])
+with st.sidebar:
+    st.markdown("""
+        <style>
+        .stRadio > div[role="radiogroup"] > label {
+            background-color: transparent;
+            border: 1px solid rgba(128, 128, 128, 0.2);
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+            display: flex;
+            justify-content: center;
+            margin-bottom: 5px;
+        }
+        .stRadio > div[role="radiogroup"] > label[data-checked="true"] {
+            background-color: rgba(255, 75, 75, 0.1);
+            border-color: #FF4B4B;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    page = st.radio("Navigation", ["Dashboard", "Productivity Insights", "Credentials"], label_visibility="collapsed")
 
 if page == "Credentials":
     st.header("Configuration")
@@ -117,94 +136,106 @@ elif page == "Dashboard":
     st.markdown("### Generate Timesheet")
     st.markdown("Fetch data based on your configuration and selected date range.")
 
-    # Date Range Picker
+    # Date Range Tabs
     today = pd.Timestamp.now().date()
-    default_start = today - pd.Timedelta(days=5)
-    default_end = today
-    
-    date_range = st.date_input(
-        "Select Date Range",
-        value=(default_start, default_end),
-        max_value=today,
-        format="DD/MM/YYYY"
-    )
+    this_week_start = today - pd.Timedelta(days=today.weekday())
+    last_week_start = this_week_start - pd.Timedelta(days=7)
+    last_week_end = this_week_start - pd.Timedelta(days=1)
+    this_month_start = today.replace(day=1)
 
+    tab1, tab2, tab3, tab4 = st.tabs(["This Week", "Last Week", "This Month", "Custom Range"])
+    
     start_date = None
     end_date = None
 
-    if isinstance(date_range, tuple):
-        if len(date_range) == 2:
-            start_date = date_range[0]
-            end_date = date_range[1]
-        elif len(date_range) == 1:
-            start_date = date_range[0]
-            end_date = start_date # If only one date selected, treat as single day range
+    with tab1:
+        st.write(f"**This Week:** {this_week_start.strftime('%d-%m-%Y')} to {today.strftime('%d-%m-%Y')}")
+        if st.button("Generate Timesheet", key="btn_db_tw"):
+            start_date, end_date = this_week_start, today
 
-    
-    if st.button("Generate Timesheet"):
+    with tab2:
+        st.write(f"**Last Week:** {last_week_start.strftime('%d-%m-%Y')} to {last_week_end.strftime('%d-%m-%Y')}")
+        if st.button("Generate Timesheet", key="btn_db_lw"):
+            start_date, end_date = last_week_start, last_week_end
+
+    with tab3:
+        st.write(f"**This Month:** {this_month_start.strftime('%d-%m-%Y')} to {today.strftime('%d-%m-%Y')}")
+        if st.button("Generate Timesheet", key="btn_db_tm"):
+            start_date, end_date = this_month_start, today
+
+    with tab4:
+        date_range = st.date_input(
+            "Select Custom Date Range",
+            value=(today - pd.Timedelta(days=5), today),
+            max_value=today,
+            format="DD/MM/YYYY"
+        )
+        if st.button("Generate Timesheet", key="btn_db_custom"):
+            if isinstance(date_range, tuple):
+                if len(date_range) == 2:
+                    start_date, end_date = date_range[0], date_range[1]
+                elif len(date_range) == 1:
+                    start_date = end_date = date_range[0]
+            else:
+                start_date = end_date = date_range
+
+    if start_date and end_date:
         creds = st.session_state['credentials']
         
         # Validation
-        if not creds["GITHUB_TOKEN"] or not creds["JIRA_TOKEN"] if "JIRA_TOKEN" in creds else False: 
-            # Note: JIRA_API_TOKEN key in creds
-            pass
-
-        if not creds["JIRA_API_TOKEN"]:
+        if not creds.get("JIRA_API_TOKEN"):
             st.error("Jira API Token is missing. Please configure it in the Credentials tab.")
-        elif not creds["GITHUB_TOKEN"]:
+        elif not creds.get("GITHUB_TOKEN"):
             st.error("GitHub Token is missing. Please configure it in the Credentials tab.")
         else:
-                if not start_date or not end_date:
-                    st.error("Please select a valid date range.")
-                else:
-                    with st.spinner(f"Fetching data from {start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}..."):
-                        try:
-                            # Pass credentials to client
-                            # We need to map GITHUB_USERNAME to GITHUB_OWNER if config.py uses it so.
-                            # client.py logic uses: project_key = credentials.get("JIRA_PROJECT_KEY")
-                            # github_user = credentials.get("GITHUB_USERNAME")
-                            
-                            data = get_data(creds, start_date=start_date, end_date=end_date)
-                            
-                            if not data:
-                                st.warning("No activity found for the selected date range.")
-                            else:
-                                # Process data into desired columns
-                                # Columns: Employee Id | Employee Name | Date | Project | Task | Task Description | Authorized Hours | Billable | Role | site | status | Remark
-                                
-                                colored_data = []
-                                for row in data:
-                                    colored_data.append({
-                                        "Employee ID": creds["EMPLOYEE_ID"],
-                                        "Employee Name": creds["EMPLOYEE_NAME"],
-                                        "Date": pd.to_datetime(row["Date"]).strftime('%d-%m-%Y'),
-                                        "Project": row["Project"],
-                                        "Activity / Process / Transaction": creds["ACTIVITY_PROCESS_TRANSACTION"],
-                                        "Task": row["Task"],
-                                        "Task Description": row["Task Description"],
-                                        "Authorized Hours": creds["AUTHORIZED_HOURS"],
-                                        "Authorized Units": creds["AUTHORIZED_UNITS"],
-                                        "UOM": creds["UOM"],
-                                        "Billable": creds["BILLABLE"],
-                                        "Site": creds["SITE"],
-                                        "Role": creds["ROLE"],
-                                        "Location": creds["LOCATION"],
-                                        "Work Item": creds["WORK_ITEM"],
-                                        "Analysis Code": creds["ANALYSIS_CODE"],
-                                        "Remarks": row["Remark"],
-                                        "Status": row["Status"],
-                                        "Booked Hours": creds["BOOKED_HOURS"],
-                                        "Booked Units": creds["BOOKED_UNITS"],
-                                        "Planned Hours": creds["PLANNED_HOURS"],
-                                        "Balance Hours": creds["BALANCE_HOURS"]
-                                    })
-                                
-                                df = pd.DataFrame(colored_data)
-                                st.session_state['timesheet_df'] = df
-                                st.success("Timesheet generated successfully!")
-                                
-                        except Exception as e:
-                            st.error(f"An error occurred: {str(e)}")
+            with st.spinner(f"Fetching data from {start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}..."):
+                try:
+                    # Pass credentials to client
+                    # We need to map GITHUB_USERNAME to GITHUB_OWNER if config.py uses it so.
+                    # client.py logic uses: project_key = credentials.get("JIRA_PROJECT_KEY")
+                    # github_user = credentials.get("GITHUB_USERNAME")
+                    
+                    data = get_data(creds, start_date=start_date, end_date=end_date)
+                    
+                    if not data:
+                        st.warning("No activity found for the selected date range.")
+                    else:
+                        # Process data into desired columns
+                        # Columns: Employee Id | Employee Name | Date | Project | Task | Task Description | Authorized Hours | Billable | Role | site | status | Remark
+                        
+                        colored_data = []
+                        for row in data:
+                            colored_data.append({
+                                "Employee ID": creds["EMPLOYEE_ID"],
+                                "Employee Name": creds["EMPLOYEE_NAME"],
+                                "Date": pd.to_datetime(row["Date"]).strftime('%d-%m-%Y'),
+                                "Project": row["Project"],
+                                "Activity / Process / Transaction": creds["ACTIVITY_PROCESS_TRANSACTION"],
+                                "Task": row["Task"],
+                                "Task Description": row["Task Description"],
+                                "Authorized Hours": creds["AUTHORIZED_HOURS"],
+                                "Authorized Units": creds["AUTHORIZED_UNITS"],
+                                "UOM": creds["UOM"],
+                                "Billable": creds["BILLABLE"],
+                                "Site": creds["SITE"],
+                                "Role": creds["ROLE"],
+                                "Location": creds["LOCATION"],
+                                "Work Item": creds["WORK_ITEM"],
+                                "Analysis Code": creds["ANALYSIS_CODE"],
+                                "Remarks": row["Remark"],
+                                "Status": row["Status"],
+                                "Booked Hours": creds["BOOKED_HOURS"],
+                                "Booked Units": creds["BOOKED_UNITS"],
+                                "Planned Hours": row.get("Planned Hours", creds["PLANNED_HOURS"]),
+                                "Balance Hours": row.get("Balance Hours", creds["BALANCE_HOURS"])
+                            })
+                        
+                        df = pd.DataFrame(colored_data)
+                        st.session_state['timesheet_df'] = df
+                        st.success("Timesheet generated successfully!")
+                        
+                except Exception as e:
+                    st.error(f"An error occurred: {str(e)}")
 
     # Display Data
     if st.session_state['timesheet_df'] is not None:
@@ -239,59 +270,48 @@ elif page == "Dashboard":
             display_df = df
 
         
-        # Custom CSS for table to wrap text and improve column width, AND fix Date Picker range highlighting
+        # Custom CSS for layout isolation
         st.markdown("""
         <style>
-        .timesheet-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 14px;
+        /* Prevent body/main from horizontal scrolling */
+        .stApp {
+            overflow-x: hidden;
         }
-        .timesheet-table th, .timesheet-table td {
-            border: 1px solid #e0e0e0;
-            padding: 10px;
-            text-align: left;
-            vertical-align: top;
-        }
-        .timesheet-table th {
-            background-color: #f0f2f6;
-            font-weight: 600;
-        }
-        .timesheet-table td {
-            white-space: pre-wrap; /* Ensures text wrapping and preserves newlines */
-            word-wrap: break-word;
-        }
-        /* Specific column widths */
-        .timesheet-table th:nth-child(7), .timesheet-table td:nth-child(7) { /* Task Description */
-            min-width: 250px;
-        }
-        .timesheet-table th:nth-child(17), .timesheet-table td:nth-child(17) { /* Remarks */
-            min-width: 300px;
-        }
-        .timesheet-table th:nth-child(6), .timesheet-table td:nth-child(6) { /* Task */
-            min-width: 200px;
-        }
-        .timesheet-table th:nth-child(3), .timesheet-table td:nth-child(3) { /* Date */
-            min-width: 120px;
-            white-space: nowrap;
-        }
-        
         /* Fix for Date Picker Range Highlighting */
-        /* These selectors target BaseWeb calendar components used by Streamlit */
         div[data-baseweb="calendar"] div[aria-selected="true"] {
-            background-color: #FF4B4B !important; /* Streamlit Red/Primary */
+            background-color: #FF4B4B !important; 
             color: white !important;
         }
-        /* Try to target the range between start and end - often uses --in-range generic class or sibling logic which is hard in CSS alone */
-        /* However, ensuring the selected days are bold/colored helps. */
-        /* Streamlit usually handles the range background via js/inline styles, forcing it here might be tricky without exact classes */
         </style>
         """, unsafe_allow_html=True)
 
-        # Render HTML table
-        # escape=True ensures security, pre-wrap handles newlines
-        html_table = display_df.to_html(classes="timesheet-table", index=False, escape=True)
-        st.markdown(html_table, unsafe_allow_html=True)
+        st.info("💡 You can edit Task, Task Description, Status, and Remarks directly in the table below. Remember to save changes before exporting!")
+
+        # Set up editable columns and container
+        editable_cols = ["Task", "Task Description", "Status", "Remarks"]
+        disabled_cols = [col for col in display_df.columns if col not in editable_cols]
+        
+        column_configurations = {
+            "Task Description": st.column_config.TextColumn("Task Description", width="large"),
+            "Remarks": st.column_config.TextColumn("Remarks", width="large"),
+            "Task": st.column_config.TextColumn("Task", width="medium"),
+            "Date": st.column_config.TextColumn("Date", width="small")
+        }
+
+        with st.container():
+            edited_df = st.data_editor(
+                display_df,
+                height=450,
+                hide_index=True,
+                disabled=disabled_cols,
+                column_config=column_configurations,
+                use_container_width=False,
+                key="timesheet_editor"
+            )
+
+        if st.button("💾 Save Changes", type="primary"):
+            st.session_state['timesheet_df'].update(edited_df)
+            st.success("Changes preserved in session state successfully!")
         
         st.markdown("---")
         
@@ -331,41 +351,59 @@ elif page == "Productivity Insights":
     st.title("Productivity Insights")
     st.markdown("Analyze your productivity across Jira and GitHub based on historical logs.")
     
-    # Reuse date picker logic
+    # Date Range Tabs
     today = pd.Timestamp.now().date()
-    default_start = today - pd.Timedelta(days=5)
-    default_end = today
-    
-    date_range = st.date_input(
-        "Select Date Range",
-        value=(default_start, default_end),
-        max_value=today,
-        format="DD/MM/YYYY"
-    )
+    this_week_start = today - pd.Timedelta(days=today.weekday())
+    last_week_start = this_week_start - pd.Timedelta(days=7)
+    last_week_end = this_week_start - pd.Timedelta(days=1)
+    this_month_start = today.replace(day=1)
 
+    tab1, tab2, tab3, tab4 = st.tabs(["This Week", "Last Week", "This Month", "Custom Range"])
+    
     start_date = None
     end_date = None
 
-    if isinstance(date_range, tuple):
-        if len(date_range) == 2:
-            start_date = date_range[0]
-            end_date = date_range[1]
-        elif len(date_range) == 1:
-            start_date = date_range[0]
-            end_date = start_date
+    with tab1:
+        st.write(f"**This Week:** {this_week_start.strftime('%d-%m-%Y')} to {today.strftime('%d-%m-%Y')}")
+        if st.button("Generate Productivity Insights", key="btn_pi_tw"):
+            start_date, end_date = this_week_start, today
 
-    if st.button("Generate Productivity Insights"):
-        if not start_date or not end_date:
-            st.error("Please select a valid date range.")
-        else:
-            with st.spinner(f"Analyzing logs from {start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}..."):
-                try:
-                    from client import generate_productivity_insights
-                    insights = generate_productivity_insights(str(start_date), str(end_date))
-                    st.session_state['insights_data'] = insights
-                    st.success("Insights generated successfully!")
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
+    with tab2:
+        st.write(f"**Last Week:** {last_week_start.strftime('%d-%m-%Y')} to {last_week_end.strftime('%d-%m-%Y')}")
+        if st.button("Generate Productivity Insights", key="btn_pi_lw"):
+            start_date, end_date = last_week_start, last_week_end
+
+    with tab3:
+        st.write(f"**This Month:** {this_month_start.strftime('%d-%m-%Y')} to {today.strftime('%d-%m-%Y')}")
+        if st.button("Generate Productivity Insights", key="btn_pi_tm"):
+            start_date, end_date = this_month_start, today
+
+    with tab4:
+        date_range = st.date_input(
+            "Select Custom Date Range",
+            value=(today - pd.Timedelta(days=5), today),
+            max_value=today,
+            format="DD/MM/YYYY",
+            key="date_pi_custom"
+        )
+        if st.button("Generate Productivity Insights", key="btn_pi_custom"):
+            if isinstance(date_range, tuple):
+                if len(date_range) == 2:
+                    start_date, end_date = date_range[0], date_range[1]
+                elif len(date_range) == 1:
+                    start_date = end_date = date_range[0]
+            else:
+                start_date = end_date = date_range
+
+    if start_date and end_date:
+        with st.spinner(f"Analyzing logs from {start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}..."):
+            try:
+                from client import generate_productivity_insights
+                insights = generate_productivity_insights(str(start_date), str(end_date))
+                st.session_state['insights_data'] = insights
+                st.success("Insights generated successfully!")
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
 
     if 'insights_data' in st.session_state and st.session_state['insights_data']:
         insights = st.session_state['insights_data']

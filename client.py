@@ -27,31 +27,36 @@ def get_dates_in_range(start_date, end_date):
         dates.append(day.strftime("%Y-%m-%d"))
     return dates
 
-def find_last_in_progress_task(current_date_str, lookback_days=5):
+def aggregate_daily_logged_hours(jira_entries, target_date, current_user_name, current_user_email):
     """
-    Scans logs backwards from current_date to find the most recent 'In Progress' Jira task.
-    Returns the task dict or None.
+    Summarizes total logged hours for a specific user on a specific date from Jira entries.
+    Returns (total_hours: float, has_worklogs: bool).
     """
-    current_date = datetime.strptime(current_date_str, "%Y-%m-%d")
+    total_seconds = 0
+    has_worklogs = False
     
-    for i in range(1, lookback_days + 1):
-        check_date = current_date - timedelta(days=i)
-        check_date_str = check_date.strftime("%Y-%m-%d")
-        log_file = f"logs/activity_{check_date_str}.json"
+    if not current_user_name:
+        current_user_name = ""
+    if not current_user_email:
+        current_user_email = ""
         
-        if os.path.exists(log_file):
-            try:
-                with open(log_file, "r") as f:
-                    data = json.load(f)
-                    jira_entries = data.get("jira", [])
-                    
-                    # Look for In Progress tasks
-                    for entry in jira_entries:
-                        if entry.get("status", "").lower() == "in progress":
-                            return entry
-            except Exception:
-                continue
-    return None
+    for entry in jira_entries:
+        for wl in entry.get("worklogs", []):
+            wl_date = wl.get("date", "")
+            wl_author_name = wl.get("author", "")
+            wl_author_email = wl.get("author_email", "")
+
+            if wl_date == target_date:
+                match_name = current_user_name and (current_user_name.lower() in wl_author_name.lower())
+                match_email = current_user_email and (current_user_email.lower() == wl_author_email.lower())
+                
+                if match_name or match_email:
+                    has_worklogs = True
+                    total_seconds += wl.get("time_spent_seconds", 0)
+    
+    return total_seconds / 3600.0, has_worklogs
+
+
 
 async def fetch_timesheet_data(credentials, start_date, end_date):
     """
@@ -105,7 +110,8 @@ async def fetch_timesheet_data(credentials, start_date, end_date):
                 try:
                     jira_resp = await session.call_tool("get_jira_activity", arguments={
                         "project_key": project_key, 
-                        "date": date
+                        "date": date,
+                        "fetch_worklogs": True
                     })
                     jira_raw_content = jira_resp.content[0].text
                     
@@ -182,6 +188,27 @@ async def fetch_timesheet_data(credentials, start_date, end_date):
                 if selected_entry or github_context:
                     daily_summary = summarize_activity(jira_context, github_context, date)
 
+                # --- Calculate Logged Hours ---
+                daily_logged_hours, has_worklogs = aggregate_daily_logged_hours(
+                    daily_jira_entries, 
+                    date, 
+                    credentials.get("EMPLOYEE_NAME", ""), 
+                    credentials.get("JIRA_EMAIL", "")
+                )
+
+                try:
+                    default_hours = float(credentials.get("AUTHORIZED_HOURS", 8))
+                except (ValueError, TypeError):
+                    default_hours = 8.0
+
+                if has_worklogs:
+                    # Logged Hours (Jira Worklogs) override default
+                    planned_hours = daily_logged_hours
+                    balance_hours = max(0.0, default_hours - planned_hours)
+                else:
+                    planned_hours = default_hours
+                    balance_hours = 0.0
+
                 # --- Create Timesheet Row ---
                 if selected_entry:
                     timesheet_data.append({
@@ -190,7 +217,9 @@ async def fetch_timesheet_data(credentials, start_date, end_date):
                         "Task": selected_entry.get("summary"),
                         "Task Description": selected_entry.get("description", ""),
                         "Status": selected_entry.get("status"),
-                        "Remark": daily_summary 
+                        "Remark": daily_summary,
+                        "Planned Hours": planned_hours,      # Logged Hours (Jira Worklogs)
+                        "Balance Hours": balance_hours
                     })
                 elif github_context:
                     # Fallback if no Jira but GitHub activity exists
@@ -200,31 +229,22 @@ async def fetch_timesheet_data(credentials, start_date, end_date):
                         "Task": "General Development Activities",
                         "Task Description": "See Remarks for details.",
                         "Status": "Completed", 
-                        "Remark": daily_summary
+                        "Remark": daily_summary,
+                        "Planned Hours": planned_hours,      # Logged Hours (Jira Worklogs)
+                        "Balance Hours": balance_hours
                     })
                 else:
                     # NO ACTIVITY FOUND
-                    # Check for "In Progress" logic from previous days
-                    last_task = find_last_in_progress_task(date)
-                    
-                    if last_task:
-                        timesheet_data.append({
-                            "Date": date,
-                            "Project": last_task.get("project", project_key),
-                            "Task": last_task.get("summary"),
-                            "Task Description": last_task.get("description", ""),
-                            "Status": "In Progress",
-                            "Remark": f"Continuing work on {last_task.get('summary')}."
-                        })
-                    else:
-                        timesheet_data.append({
-                            "Date": date,
-                            "Project": "N/A",
-                            "Task": "N/A",
-                            "Task Description": "No GitHub activity / work found",
-                            "Status": "N/A",
-                            "Remark": "No activity found."
-                        })
+                    timesheet_data.append({
+                        "Date": date,
+                        "Project": "N/A",
+                        "Task": "No activity",
+                        "Task Description": "No Jira or GitHub activity found.",
+                        "Status": "N/A",
+                        "Remark": "No activity recorded.",
+                        "Planned Hours": planned_hours,      # Logged Hours (Jira Worklogs)
+                        "Balance Hours": balance_hours
+                    })
 
     return timesheet_data
 
