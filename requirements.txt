@@ -6,4 +6,5 @@ pandas
 groq
 streamlit
 openpyxl
-#pip-system-certs
+PyGithub
+jira

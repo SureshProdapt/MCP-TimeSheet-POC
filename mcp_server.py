@@ -19,7 +19,7 @@ JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 @mcp.tool()
-async def get_jira_activity(project_key: str, date: str, fetch_worklogs: bool = False) -> str:
+def get_jira_activity(project_key: str, date: str, fetch_worklogs: bool = False) -> str:
     """
     Fetches Jira issues updated on a specific date for a given project.
     Optionally fetches worklogs for each issue.
@@ -30,118 +30,71 @@ async def get_jira_activity(project_key: str, date: str, fetch_worklogs: bool = 
         date: The date to filter by (YYYY-MM-DD).
     """
     import json
+    import sys
+    from jira import JIRA
+
     if not JIRA_URL or not JIRA_API_TOKEN:
         return json.dumps({"error": "Jira credentials not configured."})
 
-    jql = f"project = {project_key} AND updated >= '{date}' AND updated < '{date} 23:59'"
-    
-    # API v3 search/jql endpoint
-    url = f"{JIRA_URL}/rest/api/3/search/jql"
-    
-    async with httpx.AsyncClient() as client:
-        try:
-            # Use POST /rest/api/3/search/jql
-            # Payload requires 'jql' and 'fields'
-            payload = {
-                "jql": jql,
-                "fields": ["summary", "status", "updated", "description", "assignee", "project"],
-                "maxResults": 50
-            }
+    try:
+        jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN))
+        jql = f"project = {project_key} AND updated >= '{date}' AND updated < '{date} 23:59'"
+        
+        # Searching issues
+        fields = "summary,status,updated,description,assignee,project"
+        issues = jira.search_issues(jql, maxResults=50, fields=fields)
+        
+        issues_list = []
+        for issue in issues:
+            key = issue.key
+            summary = issue.fields.summary if hasattr(issue.fields, 'summary') else ""
+            status = issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else ""
+            project_name = issue.fields.project.name if hasattr(issue.fields, 'project') and issue.fields.project else ""
             
-            # DEBUG: Print configuration (masking token)
-            print(f"DEBUG: URL={url}, User={JIRA_EMAIL}", file=sys.stderr)
+            desc_raw = issue.fields.description if hasattr(issue.fields, 'description') else ""
+            description_text = str(desc_raw) if desc_raw else ""
+            
+            assignee_obj = issue.fields.assignee if hasattr(issue.fields, 'assignee') else None
+            assignee_name = assignee_obj.displayName if assignee_obj else "Unassigned"
+            updated = issue.fields.updated if hasattr(issue.fields, 'updated') else ""
 
-            response = await client.post(
-                url,
-                json=payload,
-                auth=(JIRA_EMAIL, JIRA_API_TOKEN),
-                headers={"Accept": "application/json", "Content-Type": "application/json"}
-            )
-            
-            # DEBUG: Print raw response
-            print(f"DEBUG: Status={response.status_code}", file=sys.stderr)
-            if response.status_code != 200:
-                print(f"DEBUG: Response Body={response.text}", file=sys.stderr)
-                
-            response.raise_for_status()
-            data = response.json()
-            
-            # DEBUG: Print found issues count
-            issues_found = data.get("issues", [])
-            print(f"DEBUG: Found {len(issues_found)} issues", file=sys.stderr)
-            
-            issues = []
-            for issue in issues_found:
-                key = issue.get("key")
-                fields = issue.get("fields", {})
-                summary = fields.get("summary", "")
-                status = fields.get("status", {}).get("name", "")
-                project_name = fields.get("project", {}).get("name", "")
-                
-                # Extract Description (ADF format handling - simplified text extraction)
-                description_raw = fields.get("description")
-                description_text = ""
-                if description_raw and 'content' in description_raw:
-                     try:
-                        texts = []
-                        for block in description_raw.get('content', []):
-                            if 'content' in block:
-                                for span in block['content']:
-                                    if 'text' in span:
-                                        texts.append(span['text'])
-                        description_text = " ".join(texts)
-                     except:
-                         description_text = "Could not parse description."
-                
-                assignee_obj = fields.get("assignee")
-                assignee_name = assignee_obj.get("displayName") if assignee_obj else "Unassigned"
+            worklogs_list = []
+            if fetch_worklogs:
+                try:
+                    worklogs = jira.worklogs(issue.id)
+                    for wl in worklogs:
+                        author_name = wl.author.displayName if hasattr(wl, 'author') and hasattr(wl.author, 'displayName') else "Unknown"
+                        author_email = wl.author.emailAddress if hasattr(wl, 'author') and hasattr(wl.author, 'emailAddress') else ""
+                        started_full = wl.started if hasattr(wl, 'started') else ""
+                        started_date = started_full[:10] if started_full else ""
+                        time_spent_sec = wl.timeSpentSeconds if hasattr(wl, 'timeSpentSeconds') else 0
+                        
+                        worklogs_list.append({
+                            "author": author_name,
+                            "author_email": author_email,
+                            "date": started_date,
+                            "time_spent_seconds": time_spent_sec
+                        })
+                except Exception as wl_err:
+                    print(f"DEBUG: Error fetching worklog for {key}: {wl_err}", file=sys.stderr)
 
-                # Fetch Worklogs if requested
-                worklogs = []
-                if fetch_worklogs:
-                    try:
-                        wl_url = f"{JIRA_URL}/rest/api/3/issue/{key}/worklog"
-                        wl_resp = await client.get(
-                            wl_url,
-                            auth=(JIRA_EMAIL, JIRA_API_TOKEN),
-                            headers={"Accept": "application/json"}
-                        )
-                        if wl_resp.status_code == 200:
-                            wl_data = wl_resp.json()
-                            for wl in wl_data.get("worklogs", []):
-                                author_obj = wl.get("author", {})
-                                author_name = author_obj.get("displayName", "Unknown")
-                                author_email = author_obj.get("emailAddress", "")
-                                started_full = wl.get("started", "")
-                                started_date = started_full[:10] if started_full else ""
-                                time_spent_sec = wl.get("timeSpentSeconds", 0)
-                                worklogs.append({
-                                    "author": author_name,
-                                    "author_email": author_email,
-                                    "date": started_date,
-                                    "time_spent_seconds": time_spent_sec
-                                })
-                    except Exception as wl_err:
-                        # Log error but do not fail the generation
-                        print(f"DEBUG: Error fetching worklog for {key}: {wl_err}", file=sys.stderr)
-
-                issues.append({
-                    "key": key,
-                    "summary": summary,
-                    "status": status,
-                    "description": description_text,
-                    "assignee_name": assignee_name,
-                    "project": project_name,
-                    "updated": fields.get("updated"),
-                    "worklogs": worklogs
-                })
+            issues_list.append({
+                "key": key,
+                "summary": summary,
+                "status": status,
+                "description": description_text,
+                "assignee_name": assignee_name,
+                "project": project_name,
+                "updated": updated,
+                "worklogs": worklogs_list
+            })
             
-            return json.dumps(issues)
-        except Exception as e:
-            return json.dumps({"error": f"Error fetching Jira data: {str(e)}"})
+        return json.dumps(issues_list)
+    except Exception as e:
+        return json.dumps({"error": f"Error fetching Jira data: {str(e)}"})
 
 @mcp.tool()
-async def get_github_activity(username: str, date: str) -> str:
+def get_github_activity(username: str, date: str) -> str:
     """
     Fetches GitHub activity for a user across all repositories on a specific date.
     Returns JSON string.
@@ -151,120 +104,87 @@ async def get_github_activity(username: str, date: str) -> str:
         date: The date to filter by (YYYY-MM-DD).
     """
     import json
+    import sys
+    from github import Github
+    
     if not GITHUB_TOKEN:
         return json.dumps({"error": "GitHub token not configured."})
 
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-    
-    async with httpx.AsyncClient() as client:
+    try:
+        g = Github(GITHUB_TOKEN)
+        activity_list = []
+        user = g.get_user(username)
+        
+        # 1. Fetch other events (PRs, CreateEvents) using the Events API
         try:
-            # 1. Identify active repositories from User Events
-            events_url = f"https://api.github.com/users/{username}/events"
-            params = {"per_page": 100}
-            
-            active_repos = set()
-            activity_list = []
-            page = 1
-            
-            # Scan events to find active repos and non-commit events
-            while True:
-                response = await client.get(events_url, headers=headers, params={**params, "page": page})
-                response.raise_for_status()
-                events = response.json()
-                
-                if not events:
-                    break
-                
-                for event in events:
-                    created_at = event.get("created_at", "")[:10] # YYYY-MM-DD
-                    
-                    if created_at == date:
-                        repo_name = event.get("repo", {}).get("name")
-                        event_type = event.get("type")
-                        
-                        if event_type == "PushEvent":
-                            if repo_name:
-                                active_repos.add(repo_name)
-                        elif event_type == "CreateEvent":
-                            if repo_name:
-                                active_repos.add(repo_name)
-                            # Log creation event
-                            ref_type = event.get("payload", {}).get("ref_type")
-                            ref = event.get("payload", {}).get("ref", "unknown")
-                            activity_list.append({
-                                "type": event_type,
-                                "repo": repo_name,
-                                "ref": ref,
-                                "ref_type": ref_type,
-                                "summary": f"Created {ref_type} '{ref}'",
-                                "key": f"create-{ref}-{created_at}"
-                            })
-                        elif event_type == "PullRequestEvent":
-                            repo_name = event.get("repo", {}).get("name", "unknown")
-                            action = event.get("payload", {}).get("action")
-                            title = event.get("payload", {}).get("pull_request", {}).get("title")
-                            pr_url = event.get("payload", {}).get("pull_request", {}).get("html_url")
-                            activity_list.append({
-                                "type": event_type,
-                                "repo": repo_name,
-                                "action": action,
-                                "summary": f"PR {action}: {title}",
-                                "key": pr_url,
-                                "description": f"Pull Request: {title} ({action})"
-                            })
-                            
-                    elif created_at < date:
-                        # Events are sorted by date
-                        break
-                else:
-                    # Continue to next page
-                    page += 1
-                    if page > 3: break
+            events = user.get_events()
+            for event in events:
+                if not event.created_at:
                     continue
-                break # Break out of while loop if we hit older dates
-
-            # 2. Fetch specific commits for active repositories
-            for repo in active_repos:
-                try:
-                    commits_url = f"https://api.github.com/repos/{repo}/commits"
-                    commit_params = {
-                        "author": username,
-                        "since": f"{date}T00:00:00Z",
-                        "until": f"{date}T23:59:59Z",
-                        "per_page": 100
-                    }
+                created_at = event.created_at.strftime("%Y-%m-%d")
+                
+                if created_at == date:
+                    repo_name = event.repo.name if event.repo else "unknown"
+                    event_type = event.type
                     
-                    # DEBUG: Fetching commits for repo
-                    print(f"DEBUG: Fetching commits for {repo}", file=sys.stderr)
-                    
-                    resp = await client.get(commits_url, headers=headers, params=commit_params)
-                    if resp.status_code == 200:
-                        commits = resp.json()
-                        print(f"DEBUG: Found {len(commits)} commits in {repo}", file=sys.stderr)
-                        
-                        for commit in commits:
-                            msg = commit.get("commit", {}).get("message", "")
-                            sha = commit.get("sha", "")
-                            summary = msg.split('\n')[0]
-                            activity_list.append({
-                                "type": "Commit",
-                                "repo": repo,
-                                "key": sha,
-                                "summary": summary,
-                                "description": msg
-                            })
-                    else:
-                        print(f"DEBUG: Failed to fetch commits for {repo}: {resp.status_code}", file=sys.stderr)
-                        
-                except Exception as repo_err:
-                    print(f"DEBUG: Error fetching commits for {repo}: {repo_err}", file=sys.stderr)
+                    if event_type == "CreateEvent":
+                        ref_type = event.payload.get("ref_type") if event.payload else ""
+                        ref = event.payload.get("ref", "unknown") if event.payload else "unknown"
+                        activity_list.append({
+                            "type": event_type,
+                            "repo": repo_name,
+                            "ref": ref,
+                            "ref_type": ref_type,
+                            "summary": f"Created {ref_type} '{ref}'",
+                            "key": f"create-{ref}-{event.created_at.isoformat()}"
+                        })
+                    elif event_type == "PullRequestEvent":
+                        action = event.payload.get("action") if event.payload else ""
+                        pr = event.payload.get("pull_request", {}) if event.payload else {}
+                        title = pr.get("title", "")
+                        pr_url = pr.get("html_url", "")
+                        activity_list.append({
+                            "type": event_type,
+                            "repo": repo_name,
+                            "action": action,
+                            "summary": f"PR {action}: {title}",
+                            "key": pr_url,
+                            "description": f"Pull Request: {title} ({action})"
+                        })
+                elif created_at < date:
+                    # Events are roughly ordered descending by date
+                    break
+        except Exception as event_err:
+            print(f"DEBUG: Error fetching events: {event_err}", file=sys.stderr)
 
-            return json.dumps(activity_list)
-        except Exception as e:
-            return json.dumps({"error": f"Error fetching GitHub data: {str(e)}"})
+        # 2. Fetch commits for the exact date using Search API
+        try:
+            query = f"author:{username} committer-date:{date}"
+            commits = g.search_commits(query=query, sort='committer-date', order='desc')
+            
+            seen_commits = set()
+            for c in commits[:100]:
+                if c.sha in seen_commits: continue
+                seen_commits.add(c.sha)
+                
+                repo_name = c.repository.full_name if hasattr(c, 'repository') and c.repository else "unknown"
+                    
+                msg = c.commit.message if hasattr(c, 'commit') and c.commit and c.commit.message else ""
+                summary = msg.split('\n')[0] if msg else ""
+                
+                activity_list.append({
+                    "type": "Commit",
+                    "repo": repo_name,
+                    "key": c.sha,
+                    "summary": summary,
+                    "description": msg
+                })
+        except Exception as commit_err:
+            print(f"DEBUG: Error fetching commits: {commit_err}", file=sys.stderr)
+
+        return json.dumps(activity_list)
+    except Exception as e:
+        return json.dumps({"error": f"Error fetching GitHub data: {str(e)}"})
 
 if __name__ == "__main__":
     mcp.run()
