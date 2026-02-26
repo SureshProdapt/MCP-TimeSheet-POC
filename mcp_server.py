@@ -12,6 +12,8 @@ load_dotenv()
 # Initialize FastMCP
 mcp = FastMCP("Timesheet Data Fetcher")
 
+no_worklog_dates = []
+
 # Configuration
 JIRA_URL = os.getenv("JIRA_URL")
 JIRA_EMAIL = os.getenv("JIRA_EMAIL")
@@ -36,20 +38,30 @@ def get_jira_activity(project_key: str, date: str, fetch_worklogs: bool = False)
     if not JIRA_URL or not JIRA_API_TOKEN:
         return json.dumps({"error": "Jira credentials not configured."})
 
+    global no_worklog_dates
+
     try:
         jira = JIRA(server=JIRA_URL, basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN))
-        jql = f"project = {project_key} AND updated >= '{date}' AND updated < '{date} 23:59'"
         
-        # Searching issues
-        fields = "summary,status,updated,description,assignee,project"
+        # User requested the same logic as previous code:
+        # jql = f'project = {project_key} AND (assignee = currentUser() OR worklogAuthor = currentUser()) AND updated >= -{days_lookback}d ORDER BY updated DESC'
+        # Since this accepts `date` specifically, we'll adapt it to catch anything updated recently OR that has work logged today.
+        jql = f'project = {project_key} AND (assignee = currentUser() OR worklogAuthor = currentUser()) AND (updated >= "{date}" AND updated <= "{date} 23:59" OR worklogDate = "{date}") ORDER BY updated DESC'
+        
+        # Sourcing fields matching previous Jira integration
+        fields = "summary,description,status,priority,updated,project,timeoriginalestimate,aggregatetimespent,issuetype,worklog,assignee"
         issues = jira.search_issues(jql, maxResults=50, fields=fields)
         
         issues_list = []
+        has_worklog_on_date = False
+
         for issue in issues:
             key = issue.key
+            
             summary = issue.fields.summary if hasattr(issue.fields, 'summary') else ""
             status = issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else ""
             project_name = issue.fields.project.name if hasattr(issue.fields, 'project') and issue.fields.project else ""
+            issue_type = issue.fields.issuetype.name if hasattr(issue.fields, 'issuetype') and issue.fields.issuetype else ""
             
             desc_raw = issue.fields.description if hasattr(issue.fields, 'description') else ""
             description_text = str(desc_raw) if desc_raw else ""
@@ -57,6 +69,9 @@ def get_jira_activity(project_key: str, date: str, fetch_worklogs: bool = False)
             assignee_obj = issue.fields.assignee if hasattr(issue.fields, 'assignee') else None
             assignee_name = assignee_obj.displayName if assignee_obj else "Unassigned"
             updated = issue.fields.updated if hasattr(issue.fields, 'updated') else ""
+
+            orig_est = issue.fields.timeoriginalestimate / 3600 if hasattr(issue.fields, 'timeoriginalestimate') and issue.fields.timeoriginalestimate else 0
+            time_spent_total = issue.fields.aggregatetimespent / 3600 if hasattr(issue.fields, 'aggregatetimespent') and issue.fields.aggregatetimespent else 0
 
             worklogs_list = []
             if fetch_worklogs:
@@ -68,30 +83,51 @@ def get_jira_activity(project_key: str, date: str, fetch_worklogs: bool = False)
                         started_full = wl.started if hasattr(wl, 'started') else ""
                         started_date = started_full[:10] if started_full else ""
                         time_spent_sec = wl.timeSpentSeconds if hasattr(wl, 'timeSpentSeconds') else 0
+                        comment = getattr(wl, 'comment', '')
                         
+                        if started_date == date:
+                            has_worklog_on_date = True
+                            
                         worklogs_list.append({
                             "author": author_name,
                             "author_email": author_email,
                             "date": started_date,
-                            "time_spent_seconds": time_spent_sec
+                            "time_spent_seconds": time_spent_sec,
+                            "time_spent": time_spent_sec / 3600,   # Matches previous time_spent field
+                            "comment": comment
                         })
                 except Exception as wl_err:
                     print(f"DEBUG: Error fetching worklog for {key}: {wl_err}", file=sys.stderr)
 
             issues_list.append({
                 "key": key,
+                "project_name": project_name,        # Add project_name like previous code
+                "project": project_name,             # Keep project just in case client.py uses it
                 "summary": summary,
-                "status": status,
                 "description": description_text,
+                "type": issue_type,                  # Add type like previous code
+                "status": status,
+                "original_estimate": orig_est,       # Add estimates
+                "total_spent": time_spent_total,
                 "assignee_name": assignee_name,
-                "project": project_name,
                 "updated": updated,
                 "worklogs": worklogs_list
             })
             
+        if not has_worklog_on_date:
+            if date not in no_worklog_dates:
+                no_worklog_dates.append(date)
+
         return json.dumps(issues_list)
     except Exception as e:
         return json.dumps({"error": f"Error fetching Jira data: {str(e)}"})
+
+@mcp.tool()
+def get_no_worklog_dates() -> str:
+    """Returns the list of dates where no Jira worklog was present."""
+    global no_worklog_dates
+    import json
+    return json.dumps(no_worklog_dates)
 
 @mcp.tool()
 def get_github_activity(username: str, date: str) -> str:

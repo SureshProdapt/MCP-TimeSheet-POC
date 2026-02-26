@@ -42,6 +42,9 @@ if 'credentials' not in st.session_state:
 if 'timesheet_df' not in st.session_state:
     st.session_state['timesheet_df'] = None
 
+if 'missing_dates' not in st.session_state:
+    st.session_state['missing_dates'] = []
+
 # Sidebar Navigation
 with st.sidebar:
     st.markdown("""
@@ -195,11 +198,17 @@ elif page == "Dashboard":
                     # client.py logic uses: project_key = credentials.get("JIRA_PROJECT_KEY")
                     # github_user = credentials.get("GITHUB_USERNAME")
                     
-                    data = get_data(creds, start_date=start_date, end_date=end_date)
+                    data, missing_dates = get_data(creds, start_date=start_date, end_date=end_date)
+                    st.session_state['missing_dates'] = missing_dates
                     
                     if not data:
                         st.warning("No activity found for the selected date range.")
                     else:
+                        if missing_dates:
+                            st.warning("⚠️ We have detected few days where no jira activity found. You can manually edit in the preview or log the work for these dates in the jira and Regenerate the Timesheet:")
+                            missing_df = pd.DataFrame(missing_dates, columns=["Date"])
+                            st.dataframe(missing_df, hide_index=True, width=300)
+                            
                         # Process data into desired columns
                         # Columns: Employee Id | Employee Name | Date | Project | Task | Task Description | Authorized Hours | Billable | Role | site | status | Remark
                         
@@ -299,8 +308,20 @@ elif page == "Dashboard":
         }
 
         with st.container():
+            def highlight_missing(row):
+                df_ref = st.session_state['timesheet_df']
+                date_val = df_ref.loc[row.name, 'Date']
+                missing = st.session_state.get('missing_dates', [])
+                bg_color = 'background-color: #FFFF99; color: black;' if date_val in missing else ''
+                return [
+                    bg_color if col_name in ["Task", "Task Description", "Remarks", "Planned Hours", "Balance Hours"] else ''
+                    for col_name in row.index
+                ]
+
+            styled_df = display_df.style.apply(highlight_missing, axis=1)
+
             edited_df = st.data_editor(
-                display_df,
+                styled_df,
                 height=450,
                 hide_index=True,
                 disabled=disabled_cols,

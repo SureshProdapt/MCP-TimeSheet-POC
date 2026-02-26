@@ -246,7 +246,13 @@ async def fetch_timesheet_data(credentials, start_date, end_date):
                         "Balance Hours": balance_hours
                     })
 
-    return timesheet_data
+            try:
+                resp = await session.call_tool("get_no_worklog_dates", arguments={})
+                missing_dates = json.loads(resp.content[0].text)
+            except Exception:
+                missing_dates = []
+
+    return timesheet_data, missing_dates
 
 
 def get_data(credentials, start_date=None, end_date=None):
@@ -255,12 +261,12 @@ def get_data(credentials, start_date=None, end_date=None):
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=5)
 
-    data = asyncio.run(fetch_timesheet_data(credentials, start_date, end_date))
+    data, missing_dates = asyncio.run(fetch_timesheet_data(credentials, start_date, end_date))
     
     # Sort by Date descending (newest first) for display
     data.sort(key=lambda x: x['Date'], reverse=True)
         
-    return data
+    return data, missing_dates
 
 def _normalize_jira_status(status: str) -> str:
     return (status or "").strip().lower()
